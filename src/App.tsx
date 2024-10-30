@@ -1,27 +1,94 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { Video, Mic, MicOff, VideoOff, Users, Code2, Layout, Pencil } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Video, Mic, MicOff, VideoOff, Users, Code2, Layout, Pencil, Link, Terminal as TerminalIcon } from 'lucide-react';
 import { nanoid } from 'nanoid';
 import Editor from '@monaco-editor/react';
 import { Rnd } from 'react-rnd';
+import * as Y from 'yjs';
+import { WebrtcProvider } from 'y-webrtc';
+import { MonacoBinding } from 'y-monaco';
 import { useStore } from './store';
 import VideoCall from './components/VideoCall';
 import Whiteboard from './components/Whiteboard';
+import Terminal from './components/Terminal';
+import ParticipantsList from './components/ParticipantsList';
 
 function App() {
   const [userId] = useState(() => nanoid(10));
   const [activeTab, setActiveTab] = useState('code');
   const [code, setCode] = useState('// Start coding here\n');
+  const [editorInstance, setEditorInstance] = useState(null);
+  const [yDoc, setYDoc] = useState<Y.Doc | null>(null);
+  const [provider, setProvider] = useState<WebrtcProvider | null>(null);
+
   const {
     isMuted,
     isVideoOff,
     toggleMute,
     toggleVideo,
-    connectionStatus,
-    setConnectionStatus
+    sessionId,
+    setSessionId,
+    isHost,
+    setIsHost,
+    participants,
+    roomCode,
+    setRoomCode
   } = useStore();
 
-  const handleCodeChange = (value: string | undefined) => {
-    setCode(value || '');
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const session = urlParams.get('session');
+    const room = urlParams.get('room');
+    
+    if (session && room) {
+      setSessionId(session);
+      setRoomCode(room);
+      setIsHost(false);
+    } else {
+      const newSessionId = nanoid(10);
+      const newRoomCode = nanoid(6).toUpperCase();
+      setSessionId(newSessionId);
+      setRoomCode(newRoomCode);
+      setIsHost(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!sessionId || !roomCode) return;
+
+    const doc = new Y.Doc();
+    const webrtcProvider = new WebrtcProvider(`${roomCode}-editor`, doc);
+    
+    setYDoc(doc);
+    setProvider(webrtcProvider);
+
+    return () => {
+      webrtcProvider.destroy();
+    };
+  }, [sessionId, roomCode]);
+
+  const handleEditorDidMount = (editor: any, monaco: any) => {
+    setEditorInstance(editor);
+    
+    if (yDoc && provider) {
+      const type = yDoc.getText('monaco');
+      new MonacoBinding(
+        type,
+        editor.getModel(),
+        new Set([editor]),
+        provider.awareness
+      );
+    }
+  };
+
+  const generateInviteLink = () => {
+    const baseUrl = window.location.origin + window.location.pathname;
+    return `${baseUrl}?session=${sessionId}&room=${roomCode}`;
+  };
+
+  const copyInviteLink = async () => {
+    const link = generateInviteLink();
+    await navigator.clipboard.writeText(link);
+    alert('Invite link copied to clipboard! Share this with participants to join the session.');
   };
 
   return (
@@ -31,8 +98,22 @@ function App() {
         <div className="flex items-center space-x-2">
           <Code2 className="w-8 h-8 text-blue-400" />
           <h1 className="text-xl font-bold">CodeTutor Live</h1>
+          {roomCode && (
+            <span className="ml-4 px-3 py-1 bg-blue-500 rounded text-sm">
+              Room: {roomCode}
+            </span>
+          )}
         </div>
         <div className="flex items-center space-x-4">
+          {isHost && (
+            <button
+              onClick={copyInviteLink}
+              className="flex items-center space-x-2 bg-blue-500 px-4 py-2 rounded-lg hover:bg-blue-600"
+            >
+              <Link className="w-4 h-4" />
+              <span>Share Session</span>
+            </button>
+          )}
           <button
             onClick={toggleMute}
             className={`p-2 rounded-full ${isMuted ? 'bg-red-500' : 'bg-blue-500'}`}
@@ -46,7 +127,7 @@ function App() {
             {isVideoOff ? <VideoOff /> : <Video />}
           </button>
           <div className="bg-gray-700 px-4 py-2 rounded-lg">
-            ID: {userId}
+            {isHost ? 'Host' : 'Participant'} ID: {userId}
           </div>
         </div>
       </header>
@@ -68,6 +149,12 @@ function App() {
             <Pencil />
           </button>
           <button
+            onClick={() => setActiveTab('terminal')}
+            className={`p-3 rounded-xl ${activeTab === 'terminal' ? 'bg-blue-500' : 'hover:bg-gray-700'}`}
+          >
+            <TerminalIcon />
+          </button>
+          <button
             onClick={() => setActiveTab('layout')}
             className={`p-3 rounded-xl ${activeTab === 'layout' ? 'bg-blue-500' : 'hover:bg-gray-700'}`}
           >
@@ -84,17 +171,20 @@ function App() {
                 defaultLanguage="javascript"
                 theme="vs-dark"
                 value={code}
-                onChange={handleCodeChange}
+                onMount={handleEditorDidMount}
                 options={{
                   minimap: { enabled: false },
                   fontSize: 16,
-                  wordWrap: 'on'
+                  wordWrap: 'on',
+                  readOnly: !isHost && !participants.some(p => p.id === userId)
                 }}
               />
             </div>
           )}
           
-          {activeTab === 'whiteboard' && <Whiteboard />}
+          {activeTab === 'whiteboard' && <Whiteboard sessionId={sessionId} roomCode={roomCode} />}
+          
+          {activeTab === 'terminal' && <Terminal roomCode={roomCode} />}
           
           {activeTab === 'layout' && (
             <div className="h-full bg-gray-800 rounded-lg p-4">
@@ -116,7 +206,23 @@ function App() {
             bounds="parent"
             className="absolute"
           >
-            <VideoCall userId={userId} />
+            <VideoCall userId={userId} sessionId={sessionId} roomCode={roomCode} />
+          </Rnd>
+
+          {/* Participants List */}
+          <Rnd
+            default={{
+              x: window.innerWidth - 320,
+              y: 0,
+              width: 250,
+              height: 400
+            }}
+            minWidth={200}
+            minHeight={300}
+            bounds="parent"
+            className="absolute"
+          >
+            <ParticipantsList participants={participants} />
           </Rnd>
         </div>
       </div>
